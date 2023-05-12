@@ -22,6 +22,7 @@ from examples.utils import (
     set_random_seed,
 )
 from nerfacc.estimators.occ_grid import OccGridEstimator
+import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -49,6 +50,11 @@ parser.add_argument(
     "--test_chunk_size",
     type=int,
     default=8192,
+)
+parser.add_argument(
+    "--save_dir",
+    type=str,
+    default="./train_result"
 )
 args = parser.parse_args()
 
@@ -151,6 +157,9 @@ lpips_net = LPIPS(net="vgg").to(device)
 lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
 lpips_fn = lambda x, y: lpips_net(lpips_norm_fn(x), lpips_norm_fn(y)).mean()
 
+os.makedirs(args.save_dir, exist_ok=True)
+loss_log = open(f"{args.save_dir}/loss_log.txt", "w")
+
 # training
 tic = time.time()
 for step in range(max_steps + 1):
@@ -211,21 +220,26 @@ for step in range(max_steps + 1):
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         psnr = -10.0 * torch.log(loss) / np.log(10.0)
-        print(
-            f"elapsed_time={elapsed_time:.2f}s | step={step} | "
-            f"loss={loss:.5f} | psnr={psnr:.2f} | "
-            f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} | "
+        print_str = f"elapsed_time={elapsed_time:.2f}s | step={step} | " \
+            f"loss={loss:.5f} | psnr={psnr:.2f} | " \
+            f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} | " \
             f"max_depth={depth.max():.3f} | "
-        )
+        loss_log.write(print_str + "\n")
+        loss_log.flush()
+        print(print_str)
 
     if step > 0 and step % max_steps == 0:
         # evaluation
         radiance_field.eval()
         estimator.eval()
 
+        torch.save(radiance_field.state_dict(), f"{args.save_dir}/radiance_field.pt")
+        torch.save(estimator.state_dict(), f"{args.save_dir}/estimator.pt")
+
         psnrs = []
         lpips = []
         with torch.no_grad():
+            save_image_dir = f"{args.save_dir}/test_images"
             for i in tqdm.tqdm(range(len(test_dataset))):
                 data = test_dataset[i]
                 render_bkgd = data["color_bkgd"]
@@ -250,17 +264,21 @@ for step in range(max_steps + 1):
                 psnr = -10.0 * torch.log(mse) / np.log(10.0)
                 psnrs.append(psnr.item())
                 lpips.append(lpips_fn(rgb, pixels).item())
-                # if i == 0:
-                #     imageio.imwrite(
-                #         "rgb_test.png",
-                #         (rgb.cpu().numpy() * 255).astype(np.uint8),
-                #     )
-                #     imageio.imwrite(
-                #         "rgb_error.png",
-                #         (
-                #             (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                #         ).astype(np.uint8),
-                #     )
+                os.makedirs(f"{save_image_dir}/pred", exist_ok=True)
+                imageio.imwrite(
+                    f"{save_image_dir}/pred/{i:08d}.png",
+                    (rgb.cpu().numpy() * 255).astype(np.uint8),
+                )
+                os.makedirs(f"{save_image_dir}/gt", exist_ok=True)
+                imageio.imwrite(
+                    f"{save_image_dir}/gt/{i:08d}.png",
+                    (pixels.cpu().numpy() * 255).astype(np.uint8),
+                )
+                os.makedirs(f"{save_image_dir}/error", exist_ok=True)
+                imageio.imwrite(
+                    f"{save_image_dir}/error/{i:08d}.png",
+                    ((rgb - pixels).norm(dim=-1).cpu().numpy() * 255).astype(np.uint8),
+                )
         psnr_avg = sum(psnrs) / len(psnrs)
         lpips_avg = sum(lpips) / len(lpips)
         print(f"evaluation: psnr_avg={psnr_avg}, lpips_avg={lpips_avg}")
